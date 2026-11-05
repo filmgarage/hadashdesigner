@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HADashDesigner</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; display: flex; height: 100vh; background: #f5f5f5; color: #222; }
+    aside { width: 260px; border-right: 1px solid #ddd; padding: 12px; overflow: auto; background: #fff; box-sizing: border-box; }
+    main { flex: 1; display: flex; flex-direction: column; padding: 12px; gap: 8px; box-sizing: border-box; min-width: 0; }
+    button { padding: 6px 10px; cursor: pointer; }
+    .item { display: block; width: 100%; text-align: left; margin: 2px 0; }
+    .item.active { font-weight: 600; background: #e8f0ff; }
+    textarea { flex: 1; font-family: monospace; font-size: 14px; padding: 8px; }
+    #status { font-size: 14px; }
+    pre { background: #fff; padding: 8px; overflow: auto; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <aside>
+    <h3>Dashboards</h3>
+    <button id="new">Nieuw</button>
+    <button id="diag">Diagnose</button>
+    <div id="list"></div>
+  </aside>
+  <main>
+    <div>
+      <input id="name" placeholder="naam.dash">
+      <button id="save">Opslaan</button>
+      <span id="status"></span>
+    </div>
+    <textarea id="content" spellcheck="false"></textarea>
+    <pre id="diagout" hidden></pre>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let current = null;
+
+    function status(msg, ok = true) {
+      $('status').textContent = msg;
+      $('status').style.color = ok ? '#0a7a2f' : '#b00020';
+    }
+
+    async function api(path, opts) {
+      const r = await fetch(path, opts);
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || 'fout ' + r.status);
+      return data;
+    }
+
+    async function loadList() {
+      const items = await api('api/dashboards');
+      const list = $('list');
+      list.innerHTML = '';
+      for (const it of items) {
+        const b = document.createElement('button');
+        b.className = 'item' + (it.name === current ? ' active' : '');
+        b.textContent = it.name;
+        b.onclick = () => open(it.name);
+        list.appendChild(b);
+      }
+    }
+
+    async function open(name) {
+      try {
+        const d = await api('api/dashboards/' + encodeURIComponent(name));
+        current = name;
+        $('name').value = name;
+        $('content').value = d.content;
+        status('Geladen: ' + name);
+        loadList();
+      } catch (e) {
+        status(e.message, false);
+      }
+    }
+
+    async function save() {
+      let name = $('name').value.trim();
+      if (name && !name.endsWith('.dash')) name += '.dash';
+      $('name').value = name;
+      try {
+        await api('api/dashboards/' + encodeURIComponent(name), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'text/plain' },
+          body: $('content').value,
+        });
+        current = name;
+        status('Opgeslagen: ' + name);
+        loadList();
+      } catch (e) {
+        status(e.message, false);
+      }
+    }
+
+    $('save').onclick = save;
+
+    $('new').onclick = () => {
+      current = null;
+      $('name').value = '';
+      $('content').value = 'title: Nieuw\nlayout:\n  - empty: 1\n';
+      status('Nieuw dashboard: vul een naam in en sla op');
+      loadList();
+    };
+
+    $('diag').onclick = async () => {
+      try {
+        const d = await api('api/diag');
+        $('diagout').hidden = false;
+        $('diagout').textContent = JSON.stringify(d, null, 2);
+      } catch (e) {
+        status(e.message, false);
+      }
+    };
+
+    loadList().catch((e) => status(e.message, false));
+  </script>
+</body>
+</html>
