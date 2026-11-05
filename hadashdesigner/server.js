@@ -137,12 +137,40 @@ function serveStatic(pathname, res) {
   });
 }
 
+let entityCache = { at: 0, data: [] };
+
+async function getEntities() {
+  if (Date.now() - entityCache.at < 60000 && entityCache.data.length) return entityCache.data;
+  const token = process.env.SUPERVISOR_TOKEN;
+  if (!token) throw new Error('geen SUPERVISOR_TOKEN (staat homeassistant_api aan?)');
+  const r = await fetch('http://supervisor/core/api/states', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!r.ok) throw new Error(`Home Assistant gaf ${r.status}`);
+  const states = await r.json();
+  const data = states
+    .map((st) => ({
+      entity_id: st.entity_id,
+      name: (st.attributes && st.attributes.friendly_name) || st.entity_id,
+    }))
+    .sort((a, b) => a.entity_id.localeCompare(b.entity_id));
+  entityCache = { at: Date.now(), data };
+  return data;
+}
+
 function handle(req, res) {
   const url = new URL(req.url, 'http://localhost');
   const p = url.pathname;
 
   if (p === '/api/diag' && req.method === 'GET') {
     return sendJson(res, 200, diagnose());
+  }
+
+  if (p === '/api/entities' && req.method === 'GET') {
+    getEntities()
+      .then((d) => sendJson(res, 200, d))
+      .catch((e) => sendJson(res, 502, { error: e.message }));
+    return;
   }
 
   if (p === '/api/dashboards' && req.method === 'GET') {
