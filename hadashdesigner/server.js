@@ -24,9 +24,14 @@ function loadOptions() {
 }
 
 const options = loadOptions();
-const DASH_DIR = path.resolve(
-  options.dashboard_dir || '/addon_configs/a0d7b954_appdaemon/dashboards'
-);
+const DASH_DIR = path.resolve(options.dashboard_dir || '/share/dashboards');
+
+// Map aanmaken als die ontbreekt, zodat de lijst ook na een herinstallatie werkt
+try {
+  fs.mkdirSync(DASH_DIR, { recursive: true });
+} catch (e) {
+  console.error('Kan dashboardmap niet aanmaken:', e.message);
+}
 
 function isWritable(dir) {
   try {

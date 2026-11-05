@@ -1,5 +1,5 @@
 name: HADashDesigner
-version: "0.3.0"
+version: "0.4.1"
 slug: hadashdesigner
 description: Visueel bewerken van HADashboard-bestanden (.dash) voor de fotolijst
 arch:
@@ -17,6 +17,6 @@ map:
   - addon_config:rw
   - share:rw
 options:
-  dashboard_dir: /addon_configs/a0d7b954_appdaemon/dashboards
+  dashboard_dir: /share/dashboards
 schema:
   dashboard_dir: str

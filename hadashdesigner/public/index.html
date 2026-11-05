@@ -12,13 +12,22 @@
     .pitem { display: block; width: 100%; text-align: left; padding: 4px 6px; margin: 2px 0; font-size: 13px; cursor: pointer; }
     main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
     .bar { display: flex; gap: 8px; align-items: center; padding: 8px; background: #fff; border-bottom: 1px solid #ddd; flex-wrap: wrap; }
-    #canvas { flex: 1; overflow: auto; padding: 10px; box-sizing: border-box; }
-    .grid-stack { background: #e4e4e4; min-height: 300px; border-radius: 8px; }
+    .bar input[type=number] { width: 60px; }
+    #canvas { flex: 1; overflow: auto; padding: 10px; box-sizing: border-box; min-height: 200px; }
+    .grid-stack { background: #e4e4e4; min-height: 200px; border-radius: 8px; }
     .tile { background: #2a2a2a; color: #eee; border-radius: 12px; height: 100%; padding: 8px; box-sizing: border-box; display: flex; flex-direction: column; justify-content: space-between; overflow: hidden; }
     .tile b { font-size: 14px; }
     .tile small { opacity: .7; font-size: 11px; word-break: break-all; }
     .tile .rm { align-self: flex-end; background: none; border: 0; color: #f88; font-size: 16px; cursor: pointer; padding: 0; }
-    #yaml { height: 160px; font-family: monospace; font-size: 12px; border-top: 1px solid #ddd; padding: 8px; box-sizing: border-box; width: 100%; background: #fff; }
+    .bottom { display: flex; height: 280px; border-top: 1px solid #ddd; background: #fff; }
+    #pvwrap { flex: 1; display: flex; flex-direction: column; min-width: 0; border-right: 1px solid #ddd; }
+    #pvinfo { font-size: 13px; padding: 6px 8px; border-bottom: 1px solid #eee; }
+    #preview { flex: 1; overflow: auto; padding: 8px; box-sizing: border-box; }
+    .pv { display: grid; gap: 3px; background: #ddd; padding: 3px; border-radius: 6px; }
+    .pv .cell { background: #fff; border: 1px dashed #bbb; box-sizing: border-box; }
+    .pv .t { background: #2a2a2a; color: #eee; border-radius: 6px; font-size: 11px; padding: 3px 5px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .pv .over { outline: 2px solid #b00020; }
+    #yaml { width: 45%; font-family: monospace; font-size: 12px; padding: 8px; box-sizing: border-box; border: 0; resize: none; }
     #status { font-size: 14px; }
   </style>
 </head>
@@ -32,12 +41,21 @@
       <select id="dashes"></select>
       <input id="name" placeholder="naam.dash">
       <input id="title" placeholder="Titel">
+      <label>Kolommen <input id="cols" type="number" min="1" max="24" value="12"></label>
+      <label>Rijen <input id="rows" type="number" min="1" max="30" value="6"></label>
+      <label>Celhoogte (px) <input id="cellh" type="number" min="40" max="300" value="90"></label>
       <button id="new">Nieuw</button>
       <button id="save">Opslaan</button>
       <span id="status"></span>
     </div>
     <div id="canvas"><div class="grid-stack"></div></div>
-    <textarea id="yaml" readonly></textarea>
+    <div class="bottom">
+      <div id="pvwrap">
+        <div id="pvinfo"></div>
+        <div id="preview"></div>
+      </div>
+      <textarea id="yaml" readonly></textarea>
+    </div>
   </main>
 
   <script src="https://cdn.jsdelivr.net/npm/gridstack@10.3.1/dist/gridstack-all.js"></script>
@@ -78,21 +96,31 @@
 
     function initGrid() {
       grid = GridStack.init({
-        column: 12,
-        cellHeight: 90,
+        column: Number($('cols').value),
+        cellHeight: Number($('cellh').value),
         margin: 6,
         float: false,
         minRow: 1,
         resizable: { handles: 'e, w' }, // alleen breedte: HADashboard werkt met rijen
       }, '.grid-stack');
 
-      grid.on('change added removed', updateYaml);
+      grid.on('change added removed', refresh);
 
       grid.el.addEventListener('click', (e) => {
         if (e.target.classList.contains('rm')) {
           grid.removeWidget(e.target.closest('.grid-stack-item'));
         }
       });
+    }
+
+    function applyGridSettings() {
+      const cols = Math.min(24, Math.max(1, Number($('cols').value) || 12));
+      const cellh = Math.min(300, Math.max(40, Number($('cellh').value) || 90));
+      $('cols').value = cols;
+      $('cellh').value = cellh;
+      grid.column(cols, 'moveScale');
+      grid.cellHeight(cellh);
+      refresh();
     }
 
     function addTile(entity, x, y, w = 2) {
@@ -104,7 +132,6 @@
         opts.y = y;
       }
       grid.addWidget(opts);
-      updateYaml();
     }
 
     function gridItems() {
@@ -145,8 +172,50 @@
       return jsyaml.dump(doc, { lineWidth: -1 });
     }
 
-    function updateYaml() {
+    // ---------- Voorbeeld ----------
+
+    function renderPreview() {
+      const cols = Number($('cols').value) || 12;
+      const items = gridItems();
+      const maxY = items.reduce((m, i) => Math.max(m, i.y), -1);
+      const rows = Math.max(Number($('rows').value) || 6, maxY + 1);
+      const tooWide = items.filter((i) => i.x + i.w > cols).length;
+
+      const pv = $('preview');
+      pv.innerHTML = '';
+      const board = document.createElement('div');
+      board.className = 'pv';
+      board.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+      board.style.gridTemplateRows = `repeat(${rows}, 34px)`;
+
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const d = document.createElement('div');
+          d.className = 'cell';
+          d.style.gridColumn = String(c + 1);
+          d.style.gridRow = String(r + 1);
+          board.appendChild(d);
+        }
+      }
+      for (const i of items) {
+        const d = document.createElement('div');
+        d.className = 't' + (i.x + i.w > cols ? ' over' : '');
+        d.textContent = names[i.entity] || i.entity;
+        d.title = i.entity;
+        d.style.gridColumn = `${i.x + 1} / span ${i.w}`;
+        d.style.gridRow = String(i.y + 1);
+        board.appendChild(d);
+      }
+      pv.appendChild(board);
+
+      let info = `${cols} kolommen × ${rows} rijen · ${items.length} tegel(s)`;
+      if (tooWide) info += ` · ⚠ ${tooWide} tegel(s) buiten de kolommen`;
+      $('pvinfo').textContent = info;
+    }
+
+    function refresh() {
       $('yaml').value = buildYaml();
+      renderPreview();
     }
 
     function loadYaml(text) {
@@ -171,7 +240,7 @@
         }
         y += (row && row.empty) ? Number(row.empty) : 1;
       }
-      updateYaml();
+      refresh();
       if (skipped.length) status('Overgeslagen (nog niet ondersteund): ' + skipped.join(', '), false);
     }
 
@@ -238,19 +307,23 @@
       $('title').value = '';
       $('dashes').value = '';
       grid.removeAll();
-      updateYaml();
+      refresh();
       status('Nieuw dashboard: voeg tegels toe en sla op');
     }
 
     // ---------- Start ----------
 
     $('filter').oninput = renderPalette;
-    $('title').oninput = updateYaml;
+    $('title').oninput = refresh;
+    $('cols').onchange = () => safe(async () => applyGridSettings());
+    $('cellh').onchange = () => safe(async () => applyGridSettings());
+    $('rows').oninput = refresh;
     $('save').onclick = () => safe(save);
     $('new').onclick = newDashboard;
     $('dashes').onchange = (e) => e.target.value && safe(() => open(e.target.value));
 
     initGrid();
+    refresh();
     Promise.all([loadEntities(), loadList()]).catch((e) => status(e.message, false));
   </script>
 </body>
