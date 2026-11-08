@@ -171,6 +171,13 @@ function handle(req, res) {
     return sendJson(res, 200, diagnose());
   }
 
+  if (p === '/api/settings' && req.method === 'GET') {
+    return sendJson(res, 200, {
+      appdaemon_port: Number(options.appdaemon_port) || 5050,
+      dashboard_dir: DASH_DIR,
+    });
+  }
+
   if (p === '/api/entities' && req.method === 'GET') {
     getEntities()
       .then((d) => sendJson(res, 200, d))
