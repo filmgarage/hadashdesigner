@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HADashDesigner</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/gridstack@10.3.1/dist/gridstack.min.css">
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; margin: 0; height: 100vh; display: flex; background: #f0f0f0; color: #222; }
+    .left { width: 200px; background: #fff; border-right: 1px solid #ddd; padding: 10px; overflow: auto; }
+    .left h3, #props h3 { margin: 4px 0 10px; font-size: 15px; }
+    .pitem { display: block; width: 100%; text-align: left; padding: 6px 8px; margin: 3px 0; font-size: 13px; cursor: pointer; }
+    main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+    header { display: flex; gap: 8px; align-items: center; padding: 8px; background: #fff; border-bottom: 1px solid #ddd; flex-wrap: wrap; }
+    header input { width: 160px; }
+    #status { font-size: 14px; }
+    .tabs { display: flex; gap: 0; background: #fff; border-bottom: 1px solid #ddd; }
+    .tab { padding: 8px 16px; border: 0; background: none; cursor: pointer; font-size: 14px; border-bottom: 3px solid transparent; }
+    .tab.active { border-bottom-color: #d49a1c; font-weight: 600; }
+    #view-design { flex: 1; overflow: auto; padding: 10px; }
+    #view-yaml { flex: 1; display: flex; }
+    #yamlbox { flex: 1; font-family: monospace; font-size: 13px; border: 0; padding: 10px; resize: none; }
+    #view-result { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+    #resinfo { font-size: 13px; padding: 6px 10px; background: #fff; border-bottom: 1px solid #ddd; }
+    #frame { flex: 1; border: 0; width: 100%; background: #111; }
+    .grid-stack { background: #e2e2e2; border-radius: 8px; min-height: 300px; }
+    .tile { background: #2a2a2a; color: #eee; border-radius: 12px; height: 100%; padding: 8px; display: flex; flex-direction: column; justify-content: space-between; overflow: hidden; cursor: pointer; }
+    .tile.empty { background: #6a6a6a; }
+    .tile.sel { outline: 3px solid #d49a1c; }
+    .tile b { font-size: 14px; }
+    .tile small { opacity: .7; font-size: 11px; word-break: break-all; }
+    .tile .rm { align-self: flex-end; background: none; border: 0; color: #f88; font-size: 16px; cursor: pointer; padding: 0; }
+    #props { width: 300px; background: #fff; border-left: 1px solid #ddd; padding: 10px; overflow: auto; }
+    #props label { display: block; font-size: 13px; margin: 10px 0; }
+    #props input, #props select { width: 100%; padding: 4px; margin-top: 3px; }
+    .elist { max-height: 200px; overflow: auto; border: 1px solid #eee; margin-top: 4px; }
+    .elist .pitem { font-size: 12px; margin: 0; border-bottom: 1px solid #f2f2f2; }
+    .muted { color: #777; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <aside class="left">
+    <h3>Widgets</h3>
+    <div id="palette"></div>
+  </aside>
+
+  <main>
+    <header>
+      <select id="dashes"></select>
+      <input id="name" placeholder="naam.dash">
+      <button id="new">Nieuw</button>
+      <button id="save">Opslaan</button>
+      <span id="status"></span>
+    </header>
+    <div class="tabs">
+      <button class="tab active" data-tab="design">Ontwerp</button>
+      <button class="tab" data-tab="yaml">YAML</button>
+      <button class="tab" data-tab="result">Resultaat</button>
+    </div>
+    <div id="view-design"><div class="grid-stack"></div></div>
+    <div id="view-yaml" hidden><textarea id="yamlbox" spellcheck="false"></textarea></div>
+    <div id="view-result" hidden>
+      <div id="resinfo"></div>
+      <iframe id="frame"></iframe>
+    </div>
+  </main>
+
+  <aside id="props"></aside>
+
+  <script src="https://cdn.jsdelivr.net/npm/gridstack@10.3.1/dist/gridstack-all.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/js-yaml@4.1.0/dist/js-yaml.min.js"></script>
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    // Widgettypes in de linkerbalk. domains bepaalt welke entiteiten in de lijst verschijnen.
+    const TYPES = {
+      light: { name: 'Licht', domains: ['light'] },
+      switch: { name: 'Schakelaar', domains: ['switch'] },
+      input_boolean: { name: 'Helper-schakelaar', domains: ['input_boolean'] },
+      button: { name: 'Knop', domains: ['button', 'input_button'] },
+      scene: { name: 'Scène', domains: ['scene'] },
+      script: { name: 'Script', domains: ['script'] },
+      cover: { name: 'Rolluik', domains: ['cover'] },
+      fan: { name: 'Ventilator', domains: ['fan'] },
+      climate: { name: 'Thermostaat', domains: ['climate'] },
+      sensor: { name: 'Sensor', domains: ['sensor'] },
+      weather: { name: 'Weer', domains: ['weather'] },
+      clock: { name: 'Klok', domains: [] },
+    };
+
+    let entities = [];
+    let names = {};
+    let loaded = {};        // overige bestandsinhoud, behalve layout en tegels
+    let dashTitle = '';
+    let props = {};         // tegel-id -> { type, entity, label, w }
+    let nextId = 1;
+    let selectedId = null;
+    let grid;
+    let currentTab = 'design';
+    let settings = { cols: 12, rows: 6, cellh: 90 };
+    let appdaemonPort = 5050;
+
+    function status(msg, ok = true) {
+      $('status').textContent = msg;
+      $('status').style.color = ok ? '#0a7a2f' : '#b00020';
+    }
+
+    async function safe(fn) {
+      try { await fn(); } catch (e) { status(e.message, false); }
+    }
+
+    async function api(path, opts) {
+      const r = await fetch(path, opts);
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || 'fout ' + r.status);
+      return data;
+    }
+
+    function esc(s) {
+      return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
+    function clamp(v, min, max, def) {
+      const n = Number(v);
+      if (!Number.isFinite(n)) return def;
+      return Math.min(max, Math.max(min, Math.round(n)));
+    }
+
+    // ---------- Tegels ----------
+
+    function tileHtml(id) {
+      const p = props[id];
+      const t = TYPES[p.type];
+      const title = p.label || (p.entity && names[p.entity]) || (t ? t.name : p.type);
+      const sub = p.type === 'clock' ? 'klok' : (p.entity || '(kies entiteit)');
+      const cls = ['tile',
+        id === selectedId ? 'sel' : '',
+        (!p.entity && p.type !== 'clock') ? 'empty' : ''].join(' ');
+      return `<div class="${cls}" data-id="${id}"><button class="rm" title="Verwijderen">×</button><b>${esc(title)}</b><small>${esc(sub)}</small></div>`;
+    }
+
+    function tileEl(id) {
+      const t = document.querySelector(`.tile[data-id="${id}"]`);
+      return t ? t.closest('.grid-stack-item') : null;
+    }
+
+    function refreshTile(id) {
+      const item = tileEl(id);
+      if (item) item.querySelector('.grid-stack-item-content').innerHTML = tileHtml(id);
+    }
+
+    function addWidget(type, entity = '', x, y, w = 2, label = '') {
+      const id = 'tile_' + nextId++;
+      props[id] = { type, entity, label, w };
+      const opts = { w, h: 1, minH: 1, maxH: 1, content: tileHtml(id) };
+      if (x === undefined) {
+        opts.autoPosition = true;
+      } else {
+        opts.x = x;
+        opts.y = y;
+      }
+      grid.addWidget(opts);
+      select(id);
+      return id;
+    }
+
+    function removeTile(id) {
+      const item = tileEl(id);
+      if (selectedId === id) selectedId = null;
+      delete props[id];
+      if (item) grid.removeWidget(item);
+      renderProps();
+    }
+
+    function select(id) {
+      selectedId = id;
+      document.querySelectorAll('.tile').forEach((t) => t.classList.toggle('sel', t.dataset.id === id));
+      renderProps();
+    }
+
+    // Leest de posities uit het raster en synchroniseert de breedte
+    function gridItems() {
+      return grid.getGridItems()
+        .map((el) => {
+          const n = el.gridstackNode;
+          const t = el.querySelector('.tile');
+          if (!t) return null;
+          const id = t.dataset.id;
+          if (props[id]) props[id].w = n.w;
+          return { id, x: n.x, y: n.y, w: n.w };
+        })
+        .filter(Boolean)
+        .sort((a, b) => a.y - b.y || a.x - b.x);
+    }
+
+    function initGrid() {
+      grid = GridStack.init({
+        column: settings.cols,
+        cellHeight: settings.cellh,
+        margin: 6,
+        float: false,
+        minRow: 1,
+        resizable: { handles: 'e, w' },
+      }, '.grid-stack');
+
+      grid.on('change added removed', () => { if (selectedId && props[selectedId]) renderProps(); });
+
+      grid.el.addEventListener('click', (e) => {
+        if (e.target.classList.contains('rm')) {
+          const t = e.target.closest('.grid-stack-item').querySelector('.tile');
+          removeTile(t.dataset.id);
+          return;
+        }
+        const t = e.target.closest('.tile');
+        if (t) select(t.dataset.id);
+      });
+    }
+
+    function applySettings() {
+      grid.column(settings.cols, 'moveScale');
+      grid.cellHeight(settings.cellh);
+      document.querySelector('.grid-stack').style.minHeight = (settings.rows * (settings.cellh + 6)) + 'px';
+    }
+
+    // ---------- YAML <-> raster ----------
+
+    function buildYaml() {
+      const doc = { ...loaded };
+      for (const k of Object.keys(doc)) if (/^tile_\d+$/.test(k)) delete doc[k];
+      if (dashTitle) doc.title = dashTitle; else delete doc.title;
+
+      const items = gridItems();
+      const byRow = new Map();
+      for (const i of items) {
+        if (!byRow.has(i.y)) byRow.set(i.y, []);
+        byRow.get(i.y).push(i);
+      }
+      const layout = [];
+      let cursor = 0;
+      for (const y of [...byRow.keys()].sort((a, b) => a - b)) {
+        while (cursor < y) { layout.push({ empty: 1 }); cursor++; }
+        layout.push(byRow.get(y).map((i) => i.id + (i.w > 1 ? `(${i.w}x1)` : '')).join(', '));
+        cursor++;
+      }
+
+      for (const i of items) {
+        const p = props[i.id];
+        const def = { widget_type: p.type };
+        if (p.entity) def.entity = p.entity;
+        if (p.label) def.title = p.label;
+        doc[i.id] = def;
+      }
+      doc.layout = layout;
+      return jsyaml.dump(doc, { lineWidth: -1 });
+    }
+
+    function loadYaml(text) {
+      const doc = jsyaml.load(text) || {};
+      const layout = Array.isArray(doc.layout) ? doc.layout : [];
+
+      const rest = { ...doc };
+      delete rest.layout;
+      delete rest.title;
+      for (const k of Object.keys(rest)) if (/^tile_\d+$/.test(k)) delete rest[k];
+      loaded = rest;
+      dashTitle = typeof doc.title === 'string' ? doc.title : '';
+
+      grid.removeAll();
+      props = {};
+      selectedId = null;
+
+      const skipped = [];
+      let y = 0;
+      for (const row of layout) {
+        if (typeof row === 'string') {
+          let x = 0;
+          for (const token of row.split(',').map((s) => s.trim()).filter(Boolean)) {
+            const m = token.match(/^([A-Za-z0-9_.]+)(?:\((\d+)x\d+\))?$/);
+            if (!m) { skipped.push(token); continue; }
+            const name = m[1];
+            const w = m[2] ? Number(m[2]) : 1;
+            const def = doc[name];
+            let id, type, entity = '', label = '';
+
+            if (/^tile_\d+$/.test(name) && def && typeof def === 'object' && def.widget_type) {
+              id = name;
+              type = def.widget_type;
+              entity = def.entity || '';
+              label = def.title || '';
+              nextId = Math.max(nextId, Number(name.slice(5)) + 1);
+            } else if (/^[a-z_]+\.[a-z0-9_]+$/.test(name)) {
+              id = 'tile_' + nextId++;
+              type = name.split('.')[0];
+              entity = name;
+            } else {
+              skipped.push(name);
+              continue;
+            }
+
+            props[id] = { type, entity, label, w };
+            grid.addWidget({ x, y, w, h: 1, minH: 1, maxH: 1, content: tileHtml(id) });
+            x += w;
+          }
+        }
+        y += (row && typeof row === 'object' && row.empty) ? Number(row.empty) : 1;
+      }
+      renderProps();
+      if (skipped.length) status('Overgeslagen (nog niet ondersteund): ' + skipped.join(', '), false);
+    }
+
+    // ---------- Eigenschappen ----------
+
+    function renderProps() {
+      if (!selectedId || !props[selectedId]) return renderDashProps();
+      const p = props[selectedId];
+      const item = tileEl(selectedId);
+      const pos = item ? item.gridstackNode : { x: 0, y: 0 };
+      const typeOpts = Object.entries(TYPES)
+        .map(([k, v]) => `<option value="${k}" ${k === p.type ? 'selected' : ''}>${v.name}</option>`).join('');
+
+      $('props').innerHTML = `
+        <h3>Tegel</h3>
+        <label>Type<select id="ptype">${typeOpts}</select></label>
+        ${p.type === 'clock' ? '' : `
+          <label>Entiteit<input id="pentity" value="${esc(p.entity)}" placeholder="zoek of kies uit de lijst" autocomplete="off"></label>
+          <div id="elist" class="elist"></div>`}
+        <label>Label<input id="plabel" value="${esc(p.label)}" placeholder="standaard: naam van de entiteit"></label>
+        <label>Breedte (kolommen)<input id="pw" type="number" min="1" max="${settings.cols}" value="${p.w}"></label>
+        <p class="muted">Positie: rij ${pos.y + 1}, kolom ${pos.x + 1}</p>
+        <button id="pdel">Tegel verwijderen</button>`;
+
+      $('ptype').onchange = (e) => {
+        p.type = e.target.value;
+        refreshTile(selectedId);
+        renderProps();
+      };
+      if ($('pentity')) {
+        $('pentity').oninput = renderEntityList;
+        $('pentity').onfocus = renderEntityList;
+        $('pentity').onchange = (e) => setEntity(e.target.value.trim());
+        renderEntityList();
+      }
+      $('plabel').oninput = (e) => { p.label = e.target.value; refreshTile(selectedId); };
+      $('pw').onchange = (e) => setWidth(clamp(e.target.value, 1, settings.cols, p.w));
+      $('pdel').onclick = () => removeTile(selectedId);
+    }
+
+    function renderEntityList() {
+      const p = props[selectedId];
+      if (!p || !$('elist')) return;
+      const domains = TYPES[p.type] ? TYPES[p.type].domains : [];
+      const q = $('pentity').value.toLowerCase();
+      const list = entities
+        .filter((e) => (!domains.length || domains.includes(e.entity_id.split('.')[0]))
+          && (e.entity_id + ' ' + e.name).toLowerCase().includes(q))
+        .slice(0, 80);
+      const box = $('elist');
+      box.innerHTML = '';
+      if (!list.length) { box.textContent = 'Geen entiteiten gevonden'; return; }
+      for (const e of list) {
+        const b = document.createElement('button');
+        b.className = 'pitem';
+        b.textContent = `${e.name} · ${e.entity_id}`;
+        b.onclick = () => { $('pentity').value = e.entity_id; setEntity(e.entity_id); };
+        box.appendChild(b);
+      }
+    }
+
+    function setEntity(entity) {
+      if (!selectedId) return;
+      props[selectedId].entity = entity;
+      refreshTile(selectedId);
+    }
+
+    function setWidth(w) {
+      if (!selectedId) return;
+      const item = tileEl(selectedId);
+      if (item) grid.update(item, { w });
+      props[selectedId].w = w;
+      refreshTile(selectedId);
+    }
+
+    function renderDashProps() {
+      $('props').innerHTML = `
+        <h3>Dashboard</h3>
+        <label>Titel<input id="dtitle" value="${esc(dashTitle)}"></label>
+        <label>Kolommen<input id="dcols" type="number" min="1" max="24" value="${settings.cols}"></label>
+        <label>Rijen (zichtbaar)<input id="drows" type="number" min="1" max="30" value="${settings.rows}"></label>
+        <label>Celhoogte (px)<input id="dcellh" type="number" min="40" max="300" value="${settings.cellh}"></label>
+        <label>HADashboard-poort<input id="dport" type="number" value="${appdaemonPort}" disabled></label>
+        <p class="muted">Klik op een tegel om zijn eigenschappen te zien en te wijzigen.</p>`;
+
+      $('dtitle').oninput = (e) => { dashTitle = e.target.value; };
+      $('dcols').onchange = (e) => { settings.cols = clamp(e.target.value, 1, 24, 12); applySettings(); renderDashProps(); };
+      $('drows').onchange = (e) => { settings.rows = clamp(e.target.value, 1, 30, 6); applySettings(); };
+      $('dcellh').onchange = (e) => { settings.cellh = clamp(e.target.value, 40, 300, 90); applySettings(); renderDashProps(); };
+    }
+
+    // ---------- Tabs en resultaat ----------
+
+    function showTab(name) {
+      if (currentTab === 'yaml' && name !== 'yaml') {
+        try { loadYaml($('yamlbox').value); } catch (e) { return status('YAML-fout: ' + e.message, false); }
+      }
+      currentTab = name;
+      document.querySelectorAll('.tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
+      $('view-design').hidden = name !== 'design';
+      $('view-yaml').hidden = name !== 'yaml';
+      $('view-result').hidden = name !== 'result';
+      if (name === 'yaml') $('yamlbox').value = buildYaml();
+      if (name === 'result') showResult();
+    }
+
+    function currentDashName() {
+      return $('name').value.trim().replace(/\.dash$/, '');
+    }
+
+    function showResult() {
+      const base = currentDashName();
+      if (!base) {
+        $('frame').removeAttribute('src');
+        $('resinfo').textContent = 'Sla het dashboard eerst op om het resultaat te zien.';
+        return;
+      }
+      const url = `${location.protocol}//${location.hostname}:${appdaemonPort}/${encodeURIComponent(base)}`;
+      $('resinfo').innerHTML = `Dashboard: <a href="${url}" target="_blank">${esc(url)}</a> · Compileert AppDaemon het bestand niet automatisch, dan ziet u het oude resultaat.`;
+      $('frame').src = url + '?t=' + Date.now();
+    }
+
+    // ---------- Data ----------
+
+    async function loadSettings() {
+      const s = await api('api/settings');
+      appdaemonPort = s.appdaemon_port;
+    }
+
+    async function loadEntities() {
+      entities = await api('api/entities');
+      names = Object.fromEntries(entities.map((e) => [e.entity_id, e.name]));
+      renderProps();
+    }
+
+    function renderPalette() {
+      const pal = $('palette');
+      pal.innerHTML = '';
+      for (const [k, v] of Object.entries(TYPES)) {
+        const b = document.createElement('button');
+        b.className = 'pitem';
+        b.textContent = v.name;
+        b.title = k;
+        b.onclick = () => addWidget(k, '', undefined, undefined, 2);
+        pal.appendChild(b);
+      }
+    }
+
+    async function loadList(selected) {
+      const items = await api('api/dashboards');
+      const sel = $('dashes');
+      sel.innerHTML = '<option value="">— kies een dashboard —</option>';
+      for (const it of items) {
+        const o = document.createElement('option');
+        o.value = it.name;
+        o.textContent = it.name;
+        sel.appendChild(o);
+      }
+      if (selected) sel.value = selected;
+    }
+
+    async function open(name) {
+      const d = await api('api/dashboards/' + encodeURIComponent(name));
+      $('name').value = name;
+      loadYaml(d.content);
+      status('Geladen: ' + name);
+    }
+
+    async function save() {
+      let name = $('name').value.trim();
+      if (!name) return status('Vul een naam in', false);
+      if (!name.endsWith('.dash')) name += '.dash';
+      $('name').value = name;
+      if (currentTab === 'yaml') loadYaml($('yamlbox').value);
+      await api('api/dashboards/' + encodeURIComponent(name), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'text/plain' },
+        body: buildYaml(),
+      });
+      await loadList(name);
+      status('Opgeslagen: ' + name);
+      if (currentTab === 'result') showResult();
+    }
+
+    function newDashboard() {
+      loaded = {};
+      dashTitle = '';
+      props = {};
+      selectedId = null;
+      grid.removeAll();
+      $('name').value = '';
+      $('dashes').value = '';
+      renderProps();
+      status('Nieuw dashboard: voeg widgets toe en sla op');
+    }
+
+    // ---------- Start ----------
+
+    $('save').onclick = () => safe(save);
+    $('new').onclick = newDashboard;
+    $('dashes').onchange = (e) => e.target.value && safe(() => open(e.target.value));
+    document.querySelectorAll('.tab').forEach((b) => { b.onclick = () => showTab(b.dataset.tab); });
+
+    initGrid();
+    applySettings();
+    renderPalette();
+    renderProps();
+    Promise.all([loadSettings(), loadEntities(), loadList()])
+      .catch((e) => status(e.message, false));
+  </script>
+</body>
+</html>

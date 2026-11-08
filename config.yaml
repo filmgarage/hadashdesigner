@@ -1,0 +1,24 @@
+name: HADashDesigner
+version: "0.5.0"
+slug: hadashdesigner
+description: Visueel bewerken van HADashboard-bestanden (.dash) voor de fotolijst
+arch:
+  - amd64
+  - aarch64
+startup: application
+boot: auto
+init: false
+ingress: true
+ingress_port: 8099
+homeassistant_api: true
+panel_icon: mdi:view-dashboard-edit
+panel_title: HADashDesigner
+map:
+  - addon_config:rw
+  - share:rw
+options:
+  dashboard_dir: /share/dashboards
+  appdaemon_port: 5050
+schema:
+  dashboard_dir: str
+  appdaemon_port: port
