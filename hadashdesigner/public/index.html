@@ -15,6 +15,7 @@
     header { display: flex; gap: 8px; align-items: center; padding: 8px; background: #fff; border-bottom: 1px solid #ddd; flex-wrap: wrap; }
     header input { width: 160px; }
     #status { font-size: 14px; }
+    #ha { margin-left: auto; font-size: 13px; }
     .tabs { display: flex; background: #fff; border-bottom: 1px solid #ddd; }
     .tab { padding: 8px 16px; border: 0; background: none; cursor: pointer; font-size: 14px; border-bottom: 3px solid transparent; }
     .tab.active { border-bottom-color: #d49a1c; font-weight: 600; }
@@ -31,6 +32,7 @@
     .tile.sel { outline: 3px solid #d49a1c; }
     .tile b { font-size: 14px; }
     .tile small { opacity: .7; font-size: 11px; word-break: break-all; }
+    .tile em { font-style: normal; font-size: 13px; color: #ffd27a; }
     .tile .rm { align-self: flex-end; background: none; border: 0; color: #f88; font-size: 16px; cursor: pointer; padding: 0; }
     #props { width: 300px; background: #fff; border-left: 1px solid #ddd; padding: 10px; overflow: auto; }
     #props label { display: block; font-size: 13px; margin: 10px 0; }
@@ -38,6 +40,7 @@
     .elist { max-height: 200px; overflow: auto; border: 1px solid #eee; margin-top: 4px; }
     .elist .pitem { font-size: 12px; margin: 0; border-bottom: 1px solid #f2f2f2; }
     .muted { color: #777; font-size: 12px; }
+    .actions { font-size: 12px; color: #555; word-break: break-word; }
   </style>
 </head>
 <body>
@@ -52,7 +55,10 @@
       <input id="name" placeholder="naam.dash">
       <button id="new">Nieuw</button>
       <button id="save">Opslaan</button>
+      <button id="undo" title="Ctrl+Z">Ongedaan</button>
+      <button id="redo" title="Ctrl+Y">Opnieuw</button>
       <span id="status"></span>
+      <span id="ha"></span>
     </header>
     <div class="tabs">
       <button class="tab active" data-tab="design">Ontwerp</button>
@@ -75,38 +81,12 @@
   <script>
     const $ = (id) => document.getElementById(id);
 
-    // Widgettypes zoals ze in de voorbeelddashboards voorkomen.
-    // entity: false = geen entiteit nodig. domains = welke entiteiten in de lijst passen.
-    const TYPES = {
-      clock:         { name: 'Klok', entity: false },
-      weather:       { name: 'Weer', domains: ['weather'] },
-      sensor:        { name: 'Sensor', domains: ['sensor'], units: true },
-      gauge:         { name: 'Meter', domains: ['sensor', 'input_number'], units: true },
-      text_sensor:   { name: 'Tekst-sensor', domains: ['sensor', 'input_select', 'text'] },
-      binary_sensor: { name: 'Binaire sensor', domains: ['binary_sensor'] },
-      device_tracker:{ name: 'Aanwezigheid', domains: ['device_tracker'] },
-      switch:        { name: 'Schakelaar', domains: ['switch', 'input_boolean'] },
-      light:         { name: 'Licht', domains: ['light'] },
-      scene:         { name: 'Scène', domains: ['scene'] },
-      cover:         { name: 'Rolluik / deur', domains: ['cover'] },
-      climate:       { name: 'Thermostaat', domains: ['climate'] },
-      input_number:  { name: 'Getalinvoer', domains: ['input_number'], units: true },
-      input_slider:  { name: 'Schuifregelaar', domains: ['input_number'], units: true },
-      media_player:  { name: 'Mediaspeler', domains: ['media_player'] },
-      alarm:         { name: 'Alarm', domains: ['alarm_control_panel'] },
-      group:         { name: 'Groep', domains: ['group'] },
-      camera:        { name: 'Camera', domains: ['camera'] },
-      mode:          { name: 'Modus', domains: ['input_select'] },
-      binary:        { name: 'Binair (status)', entity: false },
-      label:         { name: 'Label', entity: false, text: true },
-      navigate:      { name: 'Navigatie', entity: false, dashboard: true, url: true },
-      iframe:        { name: 'Iframe', entity: false, url: true },
-      rss:           { name: 'RSS', entity: false, url: true },
-      reload:        { name: 'Herladen', entity: false },
-    };
+    // Het widgetpalet komt uit catalog.json (server), niet uit een lijst in deze pagina
+    let TYPES = {};
 
     let entities = [];
     let names = {};
+    let live = {};          // entity -> { state, unit, name }
     let loaded = {};        // overige bestandsinhoud, behalve layout en tegels
     let dashTitle = '';
     let props = {};         // tegel-id -> eigenschappen (zie newProps)
@@ -117,6 +97,9 @@
     let readOnly = false;
     let settings = { cols: 12, rows: 6, cellw: 120, cellh: 90 };
     let appdaemonPort = 5050;
+    let haOnline = false;
+    const undoStack = [];
+    const redoStack = [];
 
     function status(msg, ok = true) {
       $('status').textContent = msg;
@@ -144,9 +127,13 @@
       return Math.min(max, Math.max(min, Math.round(n)));
     }
 
-    function hasEntity(type) {
-      return !(TYPES[type] && TYPES[type].entity === false);
+    // ---------- Typen uit de catalogus ----------
+
+    function typeInfo(type) {
+      return TYPES[type] || { name: type, entity: true, domains: [], fields: [], width: 1 };
     }
+    const hasEntity = (type) => typeInfo(type).entity !== false;
+    const hasField = (type, field) => (typeInfo(type).fields || []).includes(field);
 
     function newProps(type, entity = '', w = 2) {
       return { type, entity, title: '', title2: '', units: '', precision: '', url: '', dashboard: '', text: '', w, raw: {} };
@@ -168,17 +155,44 @@
       return p;
     }
 
+    // ---------- Ongedaan maken ----------
+
+    function checkpoint() {
+      const snap = buildYaml();
+      if (undoStack.length && undoStack[undoStack.length - 1] === snap) return;
+      undoStack.push(snap);
+      if (undoStack.length > 100) undoStack.shift();
+      redoStack.length = 0;
+    }
+
+    function undo() {
+      if (!undoStack.length) return status('Niets om ongedaan te maken', false);
+      redoStack.push(buildYaml());
+      loadYaml(undoStack.pop());
+      status('Ongedaan gemaakt');
+    }
+
+    function redo() {
+      if (!redoStack.length) return status('Niets om opnieuw uit te voeren', false);
+      undoStack.push(buildYaml());
+      loadYaml(redoStack.pop());
+      status('Opnieuw uitgevoerd');
+    }
+
     // ---------- Tegels ----------
 
     function tileHtml(id) {
       const p = props[id];
-      const t = TYPES[p.type] || { name: p.type };
+      const t = typeInfo(p.type);
       const title = p.title || (p.entity && names[p.entity]) || t.name;
       const sub = hasEntity(p.type) ? (p.entity || '(kies entiteit)') : (p.url || p.dashboard || p.text || t.name);
       const cls = ['tile',
         id === selectedId ? 'sel' : '',
         (hasEntity(p.type) && !p.entity) ? 'empty' : ''].join(' ');
-      return `<div class="${cls}" data-id="${id}"><button class="rm" title="Verwijderen">×</button><b>${esc(title)}</b><small>${esc(sub)}</small></div>`;
+      const value = p.entity && live[p.entity]
+        ? `${live[p.entity].state}${live[p.entity].unit ? ' ' + live[p.entity].unit : ''}`
+        : '';
+      return `<div class="${cls}" data-id="${id}"><button class="rm" title="Verwijderen">×</button><b>${esc(title)}</b><small>${esc(sub)}</small><em data-live="${esc(p.entity)}">${esc(value)}</em></div>`;
     }
 
     function tileEl(id) {
@@ -191,8 +205,10 @@
       if (item) item.querySelector('.grid-stack-item-content').innerHTML = tileHtml(id);
     }
 
-    function addWidget(type, entity = '', x, y, w = 2) {
+    function addWidget(type, entity = '', x, y) {
+      checkpoint();
       const id = 'tile_' + nextId++;
+      const w = typeInfo(type).width || 2;
       props[id] = newProps(type, entity, w);
       const opts = { w, h: 1, minH: 1, maxH: 1, content: tileHtml(id) };
       if (x === undefined) {
@@ -245,11 +261,13 @@
         resizable: { handles: 'e, w' },
       }, '.grid-stack');
 
+      grid.on('dragstart resizestart', () => checkpoint());
       grid.on('change added removed', () => { if (selectedId && props[selectedId]) renderProps(); });
 
       grid.el.addEventListener('click', (e) => {
         if (e.target.classList.contains('rm')) {
           const t = e.target.closest('.grid-stack-item').querySelector('.tile');
+          checkpoint();
           removeTile(t.dataset.id);
           return;
         }
@@ -365,7 +383,7 @@
             if (name === 'spacer') { x += w; continue; }
 
             const src = doc[name] && typeof doc[name] === 'object' && doc[name].widget_type ? doc[name] : null;
-            const isEntity = /^[a-z_]+\.[a-z0-9_]+$/.test(name);
+            const isEntity = ENTITY_OK.test(name);
             if (!src && !isEntity) { skipped.push(name); continue; }
 
             let id = src ? name : 'tile_' + nextId++;
@@ -383,12 +401,13 @@
       if (skipped.length) status('Overgeslagen (nog niet ondersteund): ' + skipped.join(', '), false);
     }
 
+    const ENTITY_OK = /^[a-z_]+\.[a-z0-9_]+$/;
+
     // ---------- Eigenschappen ----------
 
     function renderProps() {
       if (!selectedId || !props[selectedId]) return renderDashProps();
       const p = props[selectedId];
-      const t = TYPES[p.type] || {};
       const item = tileEl(selectedId);
       const pos = item ? item.gridstackNode : { x: 0, y: 0 };
       const typeOpts = Object.entries(TYPES)
@@ -400,30 +419,32 @@
         <label>Type<select id="ptype">${typeOpts}</select></label>
         ${hasEntity(p.type) ? `
           <label>Entiteit<input id="pentity" value="${esc(p.entity)}" placeholder="zoek of kies uit de lijst" autocomplete="off"></label>
-          <div id="elist" class="elist"></div>` : ''}
+          <div id="elist" class="elist"></div>
+          <div id="pactions" class="actions"></div>` : ''}
         <label>Titel<input id="ptitle" value="${esc(p.title)}" placeholder="standaard: naam van de entiteit"></label>
         <label>Subtitel (title2)<input id="ptitle2" value="${esc(p.title2)}"></label>
-        ${t.units ? `
-          <label>Eenheid<input id="punits" value="${esc(p.units)}" placeholder="°C, %, lux"></label>
-          <label>Decimalen<input id="pprec" type="number" min="0" max="5" value="${esc(p.precision)}"></label>` : ''}
-        ${t.text ? `<label>Tekst<input id="ptext" value="${esc(p.text)}"></label>` : ''}
-        ${t.url ? `<label>Url<input id="purl" value="${esc(p.url)}" placeholder="bijv. /MainPanel"></label>` : ''}
-        ${t.dashboard ? `<label>Dashboard (naam zonder .dash)<input id="pdash" value="${esc(p.dashboard)}"></label>` : ''}
+        ${hasField(p.type, 'units') ? `<label>Eenheid<input id="punits" value="${esc(p.units)}" placeholder="°C, %, lux"></label>` : ''}
+        ${hasField(p.type, 'precision') ? `<label>Decimalen<input id="pprec" type="number" min="0" max="5" value="${esc(p.precision)}"></label>` : ''}
+        ${hasField(p.type, 'text') ? `<label>Tekst<input id="ptext" value="${esc(p.text)}"></label>` : ''}
+        ${hasField(p.type, 'url') ? `<label>Url<input id="purl" value="${esc(p.url)}" placeholder="bijv. /MainPanel"></label>` : ''}
+        ${hasField(p.type, 'dashboard') ? `<label>Dashboard (naam zonder .dash)<input id="pdash" value="${esc(p.dashboard)}"></label>` : ''}
         <label>Breedte (kolommen)<input id="pw" type="number" min="1" max="${settings.cols}" value="${p.w}"></label>
         <p class="muted">Positie: rij ${pos.y + 1}, kolom ${pos.x + 1}</p>
         ${extraKeys.length ? `<p class="muted">Ook in het bestand: ${esc(extraKeys.join(', '))}</p>` : ''}
         <button id="pdel">Tegel verwijderen</button>`;
 
       $('ptype').onchange = (e) => {
+        checkpoint();
         p.type = e.target.value;
         refreshTile(selectedId);
         renderProps();
       };
       if ($('pentity')) {
+        $('pentity').onfocus = () => { checkpoint(); renderEntityList(); };
         $('pentity').oninput = renderEntityList;
-        $('pentity').onfocus = renderEntityList;
         $('pentity').onchange = (e) => setEntity(e.target.value.trim());
         renderEntityList();
+        showActions(p.entity);
       }
       bindText('ptitle', 'title');
       bindText('ptitle2', 'title2');
@@ -432,13 +453,15 @@
       bindText('ptext', 'text');
       bindText('purl', 'url');
       bindText('pdash', 'dashboard');
+      $('pw').onfocus = () => checkpoint();
       $('pw').onchange = (e) => setWidth(clamp(e.target.value, 1, settings.cols, p.w));
-      $('pdel').onclick = () => removeTile(selectedId);
+      $('pdel').onclick = () => { checkpoint(); removeTile(selectedId); };
     }
 
     function bindText(id, key) {
       const el = $(id);
       if (!el) return;
+      el.onfocus = () => checkpoint();
       el.oninput = (e) => {
         props[selectedId][key] = e.target.value;
         refreshTile(selectedId);
@@ -448,7 +471,7 @@
     function renderEntityList() {
       const p = props[selectedId];
       if (!p || !$('elist')) return;
-      const domains = (TYPES[p.type] && TYPES[p.type].domains) || [];
+      const domains = typeInfo(p.type).domains || [];
       const q = $('pentity').value.toLowerCase();
       const list = entities
         .filter((e) => (!domains.length || domains.includes(e.entity_id.split('.')[0]))
@@ -456,7 +479,7 @@
         .slice(0, 80);
       const box = $('elist');
       box.innerHTML = '';
-      if (!list.length) { box.textContent = 'Geen entiteiten gevonden'; return; }
+      if (!list.length) { box.textContent = entities.length ? 'Geen entiteiten gevonden' : 'Geen entiteiten (Home Assistant offline?)'; return; }
       for (const e of list) {
         const b = document.createElement('button');
         b.className = 'pitem';
@@ -466,10 +489,28 @@
       }
     }
 
+    // Toont wat Home Assistant voor deze entiteit aanbiedt (zo blijven we niet aan een vaste lijst vastzitten)
+    async function showActions(entity) {
+      const box = $('pactions');
+      if (!box || !entity) return;
+      box.textContent = '';
+      try {
+        const r = await api('api/actions?entity=' + encodeURIComponent(entity));
+        if (!box.isConnected || props[selectedId]?.entity !== entity) return;
+        box.textContent = r.actions.length
+          ? 'Acties in Home Assistant: ' + r.actions.join(', ')
+          : 'Home Assistant meldt geen acties voor deze entiteit.';
+      } catch (e) {
+        box.textContent = 'Acties niet beschikbaar: ' + e.message;
+      }
+    }
+
     function setEntity(entity) {
       if (!selectedId) return;
+      checkpoint();
       props[selectedId].entity = entity;
       refreshTile(selectedId);
+      showActions(entity);
     }
 
     function setWidth(w) {
@@ -489,14 +530,41 @@
         <label>Celbreedte px (widget_dimensions)<input id="dcellw" type="number" min="40" max="400" value="${settings.cellw}"></label>
         <label>Celhoogte px (widget_dimensions)<input id="dcellh" type="number" min="40" max="400" value="${settings.cellh}"></label>
         <label>HADashboard-poort<input type="number" value="${appdaemonPort}" disabled></label>
-        <p class="muted">Klik op een tegel om zijn eigenschappen te zien en te wijzigen.</p>`;
+        <p class="muted">Klik op een tegel om zijn eigenschappen te zien en te wijzigen. Delete verwijdert de gekozen tegel, pijltjes verplaatsen hem, Shift+pijl verandert de breedte.</p>`;
 
+      $('dtitle').onfocus = () => checkpoint();
       $('dtitle').oninput = (e) => { dashTitle = e.target.value; };
-      $('dcols').onchange = (e) => { settings.cols = clamp(e.target.value, 1, 32, 12); applySettings(); renderDashProps(); };
-      $('drows').onchange = (e) => { settings.rows = clamp(e.target.value, 1, 30, 6); applySettings(); };
-      $('dcellw').onchange = (e) => { settings.cellw = clamp(e.target.value, 40, 400, 120); renderDashProps(); };
-      $('dcellh').onchange = (e) => { settings.cellh = clamp(e.target.value, 40, 400, 90); applySettings(); renderDashProps(); };
+      $('dcols').onchange = (e) => { checkpoint(); settings.cols = clamp(e.target.value, 1, 32, 12); applySettings(); renderDashProps(); };
+      $('drows').onchange = (e) => { checkpoint(); settings.rows = clamp(e.target.value, 1, 30, 6); applySettings(); };
+      $('dcellw').onchange = (e) => { checkpoint(); settings.cellw = clamp(e.target.value, 40, 400, 120); renderDashProps(); };
+      $('dcellh').onchange = (e) => { checkpoint(); settings.cellh = clamp(e.target.value, 40, 400, 90); applySettings(); renderDashProps(); };
     }
+
+    // Toetsenbord: ongedaan maken, verwijderen, verplaatsen en breedte wijzigen
+    document.addEventListener('keydown', (e) => {
+      const tag = (e.target.tagName || '').toLowerCase();
+      if (['input', 'textarea', 'select'].includes(tag) || e.target.isContentEditable) return;
+      const key = e.key.toLowerCase();
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && key === 'z') { e.preventDefault(); return undo(); }
+      if ((e.ctrlKey || e.metaKey) && (key === 'y' || (e.shiftKey && key === 'z'))) { e.preventDefault(); return redo(); }
+      if (currentTab !== 'design' || !selectedId || !props[selectedId]) return;
+      if (e.key === 'Escape') return select(null);
+      if (e.key === 'Delete') { e.preventDefault(); checkpoint(); return removeTile(selectedId); }
+      const dx = { ArrowLeft: -1, ArrowRight: 1 }[e.key] || 0;
+      const dy = { ArrowUp: -1, ArrowDown: 1 }[e.key] || 0;
+      if (!dx && !dy) return;
+      e.preventDefault();
+      if (e.shiftKey) {
+        const w = clamp(props[selectedId].w + dx, 1, settings.cols, props[selectedId].w);
+        if (w !== props[selectedId].w) { checkpoint(); setWidth(w); }
+        return;
+      }
+      const item = tileEl(selectedId);
+      if (!item) return;
+      checkpoint();
+      const n = item.gridstackNode;
+      grid.move(item, { x: Math.max(0, n.x + dx), y: Math.max(0, n.y + dy) });
+    });
 
     // ---------- Tabs en resultaat ----------
 
@@ -530,17 +598,38 @@
       $('frame').src = url + '?t=' + Date.now();
     }
 
-    // ---------- Data ----------
+    // ---------- Data en live waarden ----------
 
     async function loadSettings() {
       const s = await api('api/settings');
       appdaemonPort = s.appdaemon_port;
     }
 
+    async function loadCatalog() {
+      const c = await api('api/catalog');
+      TYPES = c.types;
+    }
+
     async function loadEntities() {
       entities = await api('api/entities');
       names = Object.fromEntries(entities.map((e) => [e.entity_id, e.name]));
       renderProps();
+    }
+
+    // Elke paar seconden de actuele waarden van de tegels ophalen en de verbindingsstatus tonen
+    async function pollLive() {
+      const ids = [...new Set(Object.values(props).map((p) => p.entity).filter(Boolean))];
+      const r = await api('api/live?ids=' + encodeURIComponent(ids.join(',')));
+      live = r.states;
+      const wasOnline = haOnline;
+      haOnline = r.online;
+      $('ha').textContent = r.online ? '● verbonden met Home Assistant' : '● niet verbonden: ' + r.reason;
+      $('ha').style.color = r.online ? '#0a7a2f' : '#b00020';
+      if (r.online && !wasOnline) await safe(loadEntities);
+      document.querySelectorAll('[data-live]').forEach((el) => {
+        const s = live[el.dataset.live];
+        el.textContent = s ? `${s.state}${s.unit ? ' ' + s.unit : ''}` : '';
+      });
     }
 
     function renderPalette() {
@@ -551,7 +640,7 @@
         b.className = 'pitem';
         b.textContent = v.name;
         b.title = k;
-        b.onclick = () => addWidget(k, '', undefined, undefined, 2);
+        b.onclick = () => addWidget(k, '', undefined, undefined);
         pal.appendChild(b);
       }
     }
@@ -572,6 +661,8 @@
     async function open(name) {
       const d = await api('api/dashboards/' + encodeURIComponent(name));
       $('name').value = name;
+      undoStack.length = 0;
+      redoStack.length = 0;
       loadYaml(d.content);
       status(readOnly ? 'Geladen (alleen-lezen door include): ' + name : 'Geladen: ' + name, !readOnly);
     }
@@ -594,6 +685,7 @@
     }
 
     function newDashboard() {
+      checkpoint();
       loaded = {};
       dashTitle = '';
       props = {};
@@ -611,15 +703,27 @@
 
     $('save').onclick = () => safe(save);
     $('new').onclick = newDashboard;
+    $('undo').onclick = undo;
+    $('redo').onclick = redo;
     $('dashes').onchange = (e) => e.target.value && safe(() => open(e.target.value));
     document.querySelectorAll('.tab').forEach((b) => { b.onclick = () => showTab(b.dataset.tab); });
 
     initGrid();
     applySettings();
-    renderPalette();
     renderProps();
-    Promise.all([loadSettings(), loadEntities(), loadList()])
-      .catch((e) => status(e.message, false));
+    setInterval(() => safe(pollLive), 3000);
+
+    (async () => {
+      try {
+        await Promise.all([loadSettings(), loadCatalog()]);
+      } catch (e) {
+        status('Catalogus of instellingen niet geladen: ' + e.message, false);
+      }
+      renderPalette();
+      await safe(loadList);
+      await safe(loadEntities);
+      await safe(pollLive);
+    })();
   </script>
 </body>
 </html>
