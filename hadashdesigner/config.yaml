@@ -1,5 +1,5 @@
 name: HADashDesigner
-version: "0.7.0"
+version: "0.7.1"
 slug: hadashdesigner
 description: Visueel bewerken van HADashboard-bestanden (.dash) voor de fotolijst
 arch:
@@ -11,6 +11,8 @@ init: false
 ingress: true
 ingress_port: 8099
 homeassistant_api: true
+hassio_api: true
+hassio_role: homeassistant
 panel_icon: mdi:view-dashboard-edit
 panel_title: HADashDesigner
 map:
