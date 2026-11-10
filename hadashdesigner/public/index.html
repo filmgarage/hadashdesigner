@@ -15,9 +15,10 @@
     header { display: flex; gap: 8px; align-items: center; padding: 8px; background: #fff; border-bottom: 1px solid #ddd; flex-wrap: wrap; }
     header input { width: 160px; }
     #status { font-size: 14px; }
-    .tabs { display: flex; gap: 0; background: #fff; border-bottom: 1px solid #ddd; }
+    .tabs { display: flex; background: #fff; border-bottom: 1px solid #ddd; }
     .tab { padding: 8px 16px; border: 0; background: none; cursor: pointer; font-size: 14px; border-bottom: 3px solid transparent; }
     .tab.active { border-bottom-color: #d49a1c; font-weight: 600; }
+    #warn { background: #fff3cd; padding: 8px 10px; font-size: 13px; border-bottom: 1px solid #ffe08a; }
     #view-design { flex: 1; overflow: auto; padding: 10px; }
     #view-yaml { flex: 1; display: flex; }
     #yamlbox { flex: 1; font-family: monospace; font-size: 13px; border: 0; padding: 10px; resize: none; }
@@ -58,6 +59,7 @@
       <button class="tab" data-tab="yaml">YAML</button>
       <button class="tab" data-tab="result">Resultaat</button>
     </div>
+    <div id="warn" hidden>Dit dashboard gebruikt <b>include</b>-verwijzingen. De editor kan dat nog niet bewerken, dus opslaan is uitgeschakeld. Bewerk het bestand in de YAML-tab of op de server.</div>
     <div id="view-design"><div class="grid-stack"></div></div>
     <div id="view-yaml" hidden><textarea id="yamlbox" spellcheck="false"></textarea></div>
     <div id="view-result" hidden>
@@ -73,32 +75,47 @@
   <script>
     const $ = (id) => document.getElementById(id);
 
-    // Widgettypes in de linkerbalk. domains bepaalt welke entiteiten in de lijst verschijnen.
+    // Widgettypes zoals ze in de voorbeelddashboards voorkomen.
+    // entity: false = geen entiteit nodig. domains = welke entiteiten in de lijst passen.
     const TYPES = {
-      light: { name: 'Licht', domains: ['light'] },
-      switch: { name: 'Schakelaar', domains: ['switch'] },
-      input_boolean: { name: 'Helper-schakelaar', domains: ['input_boolean'] },
-      button: { name: 'Knop', domains: ['button', 'input_button'] },
-      scene: { name: 'Scène', domains: ['scene'] },
-      script: { name: 'Script', domains: ['script'] },
-      cover: { name: 'Rolluik', domains: ['cover'] },
-      fan: { name: 'Ventilator', domains: ['fan'] },
-      climate: { name: 'Thermostaat', domains: ['climate'] },
-      sensor: { name: 'Sensor', domains: ['sensor'] },
-      weather: { name: 'Weer', domains: ['weather'] },
-      clock: { name: 'Klok', domains: [] },
+      clock:         { name: 'Klok', entity: false },
+      weather:       { name: 'Weer', domains: ['weather'] },
+      sensor:        { name: 'Sensor', domains: ['sensor'], units: true },
+      gauge:         { name: 'Meter', domains: ['sensor', 'input_number'], units: true },
+      text_sensor:   { name: 'Tekst-sensor', domains: ['sensor', 'input_select', 'text'] },
+      binary_sensor: { name: 'Binaire sensor', domains: ['binary_sensor'] },
+      device_tracker:{ name: 'Aanwezigheid', domains: ['device_tracker'] },
+      switch:        { name: 'Schakelaar', domains: ['switch', 'input_boolean'] },
+      light:         { name: 'Licht', domains: ['light'] },
+      scene:         { name: 'Scène', domains: ['scene'] },
+      cover:         { name: 'Rolluik / deur', domains: ['cover'] },
+      climate:       { name: 'Thermostaat', domains: ['climate'] },
+      input_number:  { name: 'Getalinvoer', domains: ['input_number'], units: true },
+      input_slider:  { name: 'Schuifregelaar', domains: ['input_number'], units: true },
+      media_player:  { name: 'Mediaspeler', domains: ['media_player'] },
+      alarm:         { name: 'Alarm', domains: ['alarm_control_panel'] },
+      group:         { name: 'Groep', domains: ['group'] },
+      camera:        { name: 'Camera', domains: ['camera'] },
+      mode:          { name: 'Modus', domains: ['input_select'] },
+      binary:        { name: 'Binair (status)', entity: false },
+      label:         { name: 'Label', entity: false, text: true },
+      navigate:      { name: 'Navigatie', entity: false, dashboard: true, url: true },
+      iframe:        { name: 'Iframe', entity: false, url: true },
+      rss:           { name: 'RSS', entity: false, url: true },
+      reload:        { name: 'Herladen', entity: false },
     };
 
     let entities = [];
     let names = {};
     let loaded = {};        // overige bestandsinhoud, behalve layout en tegels
     let dashTitle = '';
-    let props = {};         // tegel-id -> { type, entity, label, w }
+    let props = {};         // tegel-id -> eigenschappen (zie newProps)
     let nextId = 1;
     let selectedId = null;
     let grid;
     let currentTab = 'design';
-    let settings = { cols: 12, rows: 6, cellh: 90 };
+    let readOnly = false;
+    let settings = { cols: 12, rows: 6, cellw: 120, cellh: 90 };
     let appdaemonPort = 5050;
 
     function status(msg, ok = true) {
@@ -118,7 +135,7 @@
     }
 
     function esc(s) {
-      return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+      return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     }
 
     function clamp(v, min, max, def) {
@@ -127,16 +144,40 @@
       return Math.min(max, Math.max(min, Math.round(n)));
     }
 
+    function hasEntity(type) {
+      return !(TYPES[type] && TYPES[type].entity === false);
+    }
+
+    function newProps(type, entity = '', w = 2) {
+      return { type, entity, title: '', title2: '', units: '', precision: '', url: '', dashboard: '', text: '', w, raw: {} };
+    }
+
+    // Leest een widgetdefinitie uit het bestand; onbekende sleutels blijven bewaard
+    function fromDef(d) {
+      const p = newProps(d.widget_type, d.entity || '', 1);
+      p.title = d.title ?? '';
+      p.title2 = d.title2 ?? '';
+      p.units = d.units ?? '';
+      p.precision = d.precision ?? '';
+      p.url = d.url ?? '';
+      p.dashboard = d.dashboard ?? '';
+      p.text = d.text ?? '';
+      const raw = { ...d };
+      for (const k of ['widget_type', 'entity', 'title', 'title2', 'units', 'precision', 'url', 'dashboard', 'text']) delete raw[k];
+      p.raw = raw;
+      return p;
+    }
+
     // ---------- Tegels ----------
 
     function tileHtml(id) {
       const p = props[id];
-      const t = TYPES[p.type];
-      const title = p.label || (p.entity && names[p.entity]) || (t ? t.name : p.type);
-      const sub = p.type === 'clock' ? 'klok' : (p.entity || '(kies entiteit)');
+      const t = TYPES[p.type] || { name: p.type };
+      const title = p.title || (p.entity && names[p.entity]) || t.name;
+      const sub = hasEntity(p.type) ? (p.entity || '(kies entiteit)') : (p.url || p.dashboard || p.text || t.name);
       const cls = ['tile',
         id === selectedId ? 'sel' : '',
-        (!p.entity && p.type !== 'clock') ? 'empty' : ''].join(' ');
+        (hasEntity(p.type) && !p.entity) ? 'empty' : ''].join(' ');
       return `<div class="${cls}" data-id="${id}"><button class="rm" title="Verwijderen">×</button><b>${esc(title)}</b><small>${esc(sub)}</small></div>`;
     }
 
@@ -150,9 +191,9 @@
       if (item) item.querySelector('.grid-stack-item-content').innerHTML = tileHtml(id);
     }
 
-    function addWidget(type, entity = '', x, y, w = 2, label = '') {
+    function addWidget(type, entity = '', x, y, w = 2) {
       const id = 'tile_' + nextId++;
-      props[id] = { type, entity, label, w };
+      props[id] = newProps(type, entity, w);
       const opts = { w, h: 1, minH: 1, maxH: 1, content: tileHtml(id) };
       if (x === undefined) {
         opts.autoPosition = true;
@@ -179,7 +220,7 @@
       renderProps();
     }
 
-    // Leest de posities uit het raster en synchroniseert de breedte
+    // Leest posities uit het raster en synchroniseert de breedte
     function gridItems() {
       return grid.getGridItems()
         .map((el) => {
@@ -198,7 +239,7 @@
       grid = GridStack.init({
         column: settings.cols,
         cellHeight: settings.cellh,
-        margin: 6,
+        margin: 5,
         float: false,
         minRow: 1,
         resizable: { handles: 'e, w' },
@@ -220,15 +261,23 @@
     function applySettings() {
       grid.column(settings.cols, 'moveScale');
       grid.cellHeight(settings.cellh);
-      document.querySelector('.grid-stack').style.minHeight = (settings.rows * (settings.cellh + 6)) + 'px';
+      document.querySelector('.grid-stack').style.minHeight = (settings.rows * (settings.cellh + 5)) + 'px';
     }
 
     // ---------- YAML <-> raster ----------
 
     function buildYaml() {
-      const doc = { ...loaded };
-      for (const k of Object.keys(doc)) if (/^tile_\d+$/.test(k)) delete doc[k];
-      if (dashTitle) doc.title = dashTitle; else delete doc.title;
+      const rest = { ...loaded };
+      for (const k of ['title', 'widget_dimensions', 'widget_margins', 'columns', 'rows', 'layout']) delete rest[k];
+      for (const k of Object.keys(rest)) if (/^tile_\d+$/.test(k)) delete rest[k];
+
+      const doc = {};
+      if (dashTitle) doc.title = dashTitle;
+      doc.widget_dimensions = [settings.cellw, settings.cellh];
+      doc.widget_margins = Array.isArray(loaded.widget_margins) ? loaded.widget_margins : [5, 5];
+      doc.columns = settings.cols;
+      doc.rows = settings.rows;
+      Object.assign(doc, rest);
 
       const items = gridItems();
       const byRow = new Map();
@@ -247,8 +296,15 @@
       for (const i of items) {
         const p = props[i.id];
         const def = { widget_type: p.type };
-        if (p.entity) def.entity = p.entity;
-        if (p.label) def.title = p.label;
+        if (hasEntity(p.type) && p.entity) def.entity = p.entity;
+        if (p.title) def.title = p.title;
+        if (p.title2) def.title2 = p.title2;
+        if (p.units) def.units = p.units;
+        if (p.precision !== '' && p.precision !== null && p.precision !== undefined) def.precision = Number(p.precision);
+        if (p.url) def.url = p.url;
+        if (p.dashboard) def.dashboard = p.dashboard;
+        if (p.text) def.text = p.text;
+        Object.assign(def, p.raw);
         doc[i.id] = def;
       }
       doc.layout = layout;
@@ -259,12 +315,38 @@
       const doc = jsyaml.load(text) || {};
       const layout = Array.isArray(doc.layout) ? doc.layout : [];
 
+      // Namen die in de layout voorkomen worden tegels; de rest blijft bewaard
+      const used = new Set();
+      for (const row of layout) {
+        if (typeof row !== 'string') continue;
+        for (const tok of row.split(',')) {
+          const m = tok.trim().match(/^([A-Za-z0-9_.]+)/);
+          if (m) used.add(m[1]);
+        }
+      }
       const rest = { ...doc };
-      delete rest.layout;
-      delete rest.title;
-      for (const k of Object.keys(rest)) if (/^tile_\d+$/.test(k)) delete rest[k];
+      for (const k of ['layout', 'title', 'widget_dimensions', 'widget_margins', 'columns', 'rows']) delete rest[k];
+      for (const k of Object.keys(rest)) if (used.has(k) || /^tile_\d+$/.test(k)) delete rest[k];
       loaded = rest;
+      loaded.widget_margins = doc.widget_margins;
       dashTitle = typeof doc.title === 'string' ? doc.title : '';
+
+      if (Array.isArray(doc.widget_dimensions)) {
+        settings.cellw = clamp(doc.widget_dimensions[0], 40, 400, settings.cellw);
+        settings.cellh = clamp(doc.widget_dimensions[1], 40, 400, settings.cellh);
+      }
+      settings.cols = clamp(doc.columns, 1, 32, settings.cols);
+      settings.rows = clamp(doc.rows, 1, 30, settings.rows);
+      applySettings();
+
+      nextId = 1;
+      for (const k of Object.keys(doc)) {
+        const m = k.match(/^tile_(\d+)$/);
+        if (m) nextId = Math.max(nextId, Number(m[1]) + 1);
+      }
+
+      readOnly = layout.some((r) => r && typeof r === 'object' && r.include !== undefined);
+      $('warn').hidden = !readOnly;
 
       grid.removeAll();
       props = {};
@@ -280,25 +362,17 @@
             if (!m) { skipped.push(token); continue; }
             const name = m[1];
             const w = m[2] ? Number(m[2]) : 1;
-            const def = doc[name];
-            let id, type, entity = '', label = '';
+            if (name === 'spacer') { x += w; continue; }
 
-            if (/^tile_\d+$/.test(name) && def && typeof def === 'object' && def.widget_type) {
-              id = name;
-              type = def.widget_type;
-              entity = def.entity || '';
-              label = def.title || '';
-              nextId = Math.max(nextId, Number(name.slice(5)) + 1);
-            } else if (/^[a-z_]+\.[a-z0-9_]+$/.test(name)) {
-              id = 'tile_' + nextId++;
-              type = name.split('.')[0];
-              entity = name;
-            } else {
-              skipped.push(name);
-              continue;
-            }
+            const src = doc[name] && typeof doc[name] === 'object' && doc[name].widget_type ? doc[name] : null;
+            const isEntity = /^[a-z_]+\.[a-z0-9_]+$/.test(name);
+            if (!src && !isEntity) { skipped.push(name); continue; }
 
-            props[id] = { type, entity, label, w };
+            let id = src ? name : 'tile_' + nextId++;
+            if (props[id]) id = 'tile_' + nextId++;   // zelfde naam twee keer in de layout
+            const p = src ? fromDef(src) : newProps(name.split('.')[0], name, w);
+            p.w = w;
+            props[id] = p;
             grid.addWidget({ x, y, w, h: 1, minH: 1, maxH: 1, content: tileHtml(id) });
             x += w;
           }
@@ -314,20 +388,30 @@
     function renderProps() {
       if (!selectedId || !props[selectedId]) return renderDashProps();
       const p = props[selectedId];
+      const t = TYPES[p.type] || {};
       const item = tileEl(selectedId);
       const pos = item ? item.gridstackNode : { x: 0, y: 0 };
       const typeOpts = Object.entries(TYPES)
         .map(([k, v]) => `<option value="${k}" ${k === p.type ? 'selected' : ''}>${v.name}</option>`).join('');
+      const extraKeys = Object.keys(p.raw || {});
 
       $('props').innerHTML = `
-        <h3>Tegel</h3>
+        <h3>Tegel <span class="muted">${esc(selectedId)}</span></h3>
         <label>Type<select id="ptype">${typeOpts}</select></label>
-        ${p.type === 'clock' ? '' : `
+        ${hasEntity(p.type) ? `
           <label>Entiteit<input id="pentity" value="${esc(p.entity)}" placeholder="zoek of kies uit de lijst" autocomplete="off"></label>
-          <div id="elist" class="elist"></div>`}
-        <label>Label<input id="plabel" value="${esc(p.label)}" placeholder="standaard: naam van de entiteit"></label>
+          <div id="elist" class="elist"></div>` : ''}
+        <label>Titel<input id="ptitle" value="${esc(p.title)}" placeholder="standaard: naam van de entiteit"></label>
+        <label>Subtitel (title2)<input id="ptitle2" value="${esc(p.title2)}"></label>
+        ${t.units ? `
+          <label>Eenheid<input id="punits" value="${esc(p.units)}" placeholder="°C, %, lux"></label>
+          <label>Decimalen<input id="pprec" type="number" min="0" max="5" value="${esc(p.precision)}"></label>` : ''}
+        ${t.text ? `<label>Tekst<input id="ptext" value="${esc(p.text)}"></label>` : ''}
+        ${t.url ? `<label>Url<input id="purl" value="${esc(p.url)}" placeholder="bijv. /MainPanel"></label>` : ''}
+        ${t.dashboard ? `<label>Dashboard (naam zonder .dash)<input id="pdash" value="${esc(p.dashboard)}"></label>` : ''}
         <label>Breedte (kolommen)<input id="pw" type="number" min="1" max="${settings.cols}" value="${p.w}"></label>
         <p class="muted">Positie: rij ${pos.y + 1}, kolom ${pos.x + 1}</p>
+        ${extraKeys.length ? `<p class="muted">Ook in het bestand: ${esc(extraKeys.join(', '))}</p>` : ''}
         <button id="pdel">Tegel verwijderen</button>`;
 
       $('ptype').onchange = (e) => {
@@ -341,15 +425,30 @@
         $('pentity').onchange = (e) => setEntity(e.target.value.trim());
         renderEntityList();
       }
-      $('plabel').oninput = (e) => { p.label = e.target.value; refreshTile(selectedId); };
+      bindText('ptitle', 'title');
+      bindText('ptitle2', 'title2');
+      bindText('punits', 'units');
+      bindText('pprec', 'precision');
+      bindText('ptext', 'text');
+      bindText('purl', 'url');
+      bindText('pdash', 'dashboard');
       $('pw').onchange = (e) => setWidth(clamp(e.target.value, 1, settings.cols, p.w));
       $('pdel').onclick = () => removeTile(selectedId);
+    }
+
+    function bindText(id, key) {
+      const el = $(id);
+      if (!el) return;
+      el.oninput = (e) => {
+        props[selectedId][key] = e.target.value;
+        refreshTile(selectedId);
+      };
     }
 
     function renderEntityList() {
       const p = props[selectedId];
       if (!p || !$('elist')) return;
-      const domains = TYPES[p.type] ? TYPES[p.type].domains : [];
+      const domains = (TYPES[p.type] && TYPES[p.type].domains) || [];
       const q = $('pentity').value.toLowerCase();
       const list = entities
         .filter((e) => (!domains.length || domains.includes(e.entity_id.split('.')[0]))
@@ -385,16 +484,18 @@
       $('props').innerHTML = `
         <h3>Dashboard</h3>
         <label>Titel<input id="dtitle" value="${esc(dashTitle)}"></label>
-        <label>Kolommen<input id="dcols" type="number" min="1" max="24" value="${settings.cols}"></label>
-        <label>Rijen (zichtbaar)<input id="drows" type="number" min="1" max="30" value="${settings.rows}"></label>
-        <label>Celhoogte (px)<input id="dcellh" type="number" min="40" max="300" value="${settings.cellh}"></label>
-        <label>HADashboard-poort<input id="dport" type="number" value="${appdaemonPort}" disabled></label>
+        <label>Kolommen (columns)<input id="dcols" type="number" min="1" max="32" value="${settings.cols}"></label>
+        <label>Rijen (rows)<input id="drows" type="number" min="1" max="30" value="${settings.rows}"></label>
+        <label>Celbreedte px (widget_dimensions)<input id="dcellw" type="number" min="40" max="400" value="${settings.cellw}"></label>
+        <label>Celhoogte px (widget_dimensions)<input id="dcellh" type="number" min="40" max="400" value="${settings.cellh}"></label>
+        <label>HADashboard-poort<input type="number" value="${appdaemonPort}" disabled></label>
         <p class="muted">Klik op een tegel om zijn eigenschappen te zien en te wijzigen.</p>`;
 
       $('dtitle').oninput = (e) => { dashTitle = e.target.value; };
-      $('dcols').onchange = (e) => { settings.cols = clamp(e.target.value, 1, 24, 12); applySettings(); renderDashProps(); };
+      $('dcols').onchange = (e) => { settings.cols = clamp(e.target.value, 1, 32, 12); applySettings(); renderDashProps(); };
       $('drows').onchange = (e) => { settings.rows = clamp(e.target.value, 1, 30, 6); applySettings(); };
-      $('dcellh').onchange = (e) => { settings.cellh = clamp(e.target.value, 40, 300, 90); applySettings(); renderDashProps(); };
+      $('dcellw').onchange = (e) => { settings.cellw = clamp(e.target.value, 40, 400, 120); renderDashProps(); };
+      $('dcellh').onchange = (e) => { settings.cellh = clamp(e.target.value, 40, 400, 90); applySettings(); renderDashProps(); };
     }
 
     // ---------- Tabs en resultaat ----------
@@ -408,6 +509,7 @@
       $('view-design').hidden = name !== 'design';
       $('view-yaml').hidden = name !== 'yaml';
       $('view-result').hidden = name !== 'result';
+      $('warn').hidden = !(readOnly && name === 'design');
       if (name === 'yaml') $('yamlbox').value = buildYaml();
       if (name === 'result') showResult();
     }
@@ -471,12 +573,13 @@
       const d = await api('api/dashboards/' + encodeURIComponent(name));
       $('name').value = name;
       loadYaml(d.content);
-      status('Geladen: ' + name);
+      status(readOnly ? 'Geladen (alleen-lezen door include): ' + name : 'Geladen: ' + name, !readOnly);
     }
 
     async function save() {
       let name = $('name').value.trim();
       if (!name) return status('Vul een naam in', false);
+      if (readOnly) return status('Opslaan uitgeschakeld: dit dashboard gebruikt include-verwijzingen', false);
       if (!name.endsWith('.dash')) name += '.dash';
       $('name').value = name;
       if (currentTab === 'yaml') loadYaml($('yamlbox').value);
@@ -495,6 +598,8 @@
       dashTitle = '';
       props = {};
       selectedId = null;
+      readOnly = false;
+      $('warn').hidden = true;
       grid.removeAll();
       $('name').value = '';
       $('dashes').value = '';
