@@ -7,7 +7,7 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev
 
-COPY server.js ./
+COPY server.js catalog.json ./
 COPY public ./public
 
 CMD ["node", "/app/server.js"]

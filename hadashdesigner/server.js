@@ -2,12 +2,16 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const yaml = require('js-yaml');
+const WebSocket = require('ws');
 
 const PORT = 8099; // ingress-poort; wordt niet extern geopend
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const BACKUP_DIR = '/data/backups';
 const MAX_BODY = 200_000;
 const NAME_RE = /^[A-Za-z0-9_-]{1,64}\.dash$/;
+const ENTITY_RE = /^[a-z_]+\.[a-z0-9_]+$/;
+const HA_WS_URL = 'ws://supervisor/core/websocket';
+const TOKEN = process.env.SUPERVISOR_TOKEN || '';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -66,10 +70,7 @@ function diagnose() {
     dir_exists: exists,
     dir_writable: exists && isWritable(DASH_DIR),
     dir_files: exists ? fs.readdirSync(DASH_DIR) : [],
-    addon_configs_visible: fs.existsSync('/addon_configs')
-      ? fs.readdirSync('/addon_configs')
-      : 'niet zichtbaar',
-    share_visible: fs.existsSync('/share'),
+    ha: { online: ha.online, reason: ha.reason, entities: ha.states.size },
   };
 }
 
@@ -115,7 +116,7 @@ function saveDashboard(name, file, body, res) {
       fs.mkdirSync(BACKUP_DIR, { recursive: true });
       fs.copyFileSync(file, path.join(BACKUP_DIR, `${name}.${Date.now()}.bak`));
     }
-    // Eerst naar een tijdelijk bestand schrijven, dan hernoemen: zo kan AppDaemon nooit een half bestand lezen
+    // Eerst naar een tijdelijk bestand schrijven, dan hernoemen: AppDaemon kan nooit een half bestand lezen
     const tmp = path.join(DASH_DIR, `.${name}.partial`);
     fs.writeFileSync(tmp, body, 'utf8');
     fs.renameSync(tmp, file);
@@ -142,26 +143,117 @@ function serveStatic(pathname, res) {
   });
 }
 
-let entityCache = { at: 0, data: [] };
+// ---------- Home Assistant (websocket, zoals de Tessera-add-on) ----------
+//
+// Eén verbinding met de Supervisor-proxy. Na authenticatie: state_changed abonneren en daarna get_states,
+// zodat er geen wijziging tussen de twee in verloren gaat. Verbinding weg? Dan wachten en opnieuw verbinden.
 
-async function getEntities() {
-  if (Date.now() - entityCache.at < 60000 && entityCache.data.length) return entityCache.data;
-  const token = process.env.SUPERVISOR_TOKEN;
-  if (!token) throw new Error('geen SUPERVISOR_TOKEN (staat homeassistant_api aan?)');
-  const r = await fetch('http://supervisor/core/api/states', {
-    headers: { Authorization: `Bearer ${token}` },
+const ha = {
+  ws: null,
+  online: false,
+  reason: TOKEN ? 'nog niet verbonden' : 'geen SUPERVISOR_TOKEN (staat homeassistant_api aan?)',
+  nextId: 1,
+  pending: new Map(),   // id -> { resolve, reject }
+  states: new Map(),    // entity_id -> state
+  seq: 0,               // gaat omhoog bij elke wijziging
+};
+
+function haRequest(msg, timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    if (!ha.ws || ha.ws.readyState !== WebSocket.OPEN || !ha.online) {
+      return reject(new Error('geen verbinding met Home Assistant'));
+    }
+    const id = ha.nextId++;
+    const timer = setTimeout(() => {
+      ha.pending.delete(id);
+      reject(new Error('Home Assistant reageert niet'));
+    }, timeoutMs);
+    ha.pending.set(id, {
+      resolve: (v) => { clearTimeout(timer); resolve(v); },
+      reject: (e) => { clearTimeout(timer); reject(e); },
+    });
+    ha.ws.send(JSON.stringify({ ...msg, id }));
   });
-  if (!r.ok) throw new Error(`Home Assistant gaf ${r.status}`);
-  const states = await r.json();
-  const data = states
-    .map((st) => ({
-      entity_id: st.entity_id,
-      name: (st.attributes && st.attributes.friendly_name) || st.entity_id,
-    }))
-    .sort((a, b) => a.entity_id.localeCompare(b.entity_id));
-  entityCache = { at: Date.now(), data };
-  return data;
 }
+
+async function handleHa(msg, sock) {
+  if (msg.type === 'auth_required') {
+    return sock.send(JSON.stringify({ type: 'auth', access_token: TOKEN }));
+  }
+  if (msg.type === 'auth_invalid') {
+    ha.reason = 'Home Assistant weigerde de token';
+    return sock.close();
+  }
+  if (msg.type === 'auth_ok') {
+    ha.online = true;
+    ha.reason = 'verbonden';
+    await haRequest({ type: 'subscribe_events', event_type: 'state_changed' });
+    const list = await haRequest({ type: 'get_states' });
+    ha.states.clear();
+    for (const s of list) ha.states.set(s.entity_id, s);
+    ha.seq++;
+    console.log(`Home Assistant verbonden: ${ha.states.size} entiteiten`);
+    return;
+  }
+  if (msg.type === 'result') {
+    const p = ha.pending.get(msg.id);
+    if (!p) return;
+    ha.pending.delete(msg.id);
+    if (msg.success) p.resolve(msg.result);
+    else p.reject(new Error((msg.error && msg.error.message) || 'fout van Home Assistant'));
+    return;
+  }
+  if (msg.type === 'event' && msg.event && msg.event.event_type === 'state_changed') {
+    const d = msg.event.data;
+    if (d.new_state) ha.states.set(d.entity_id, d.new_state);
+    else ha.states.delete(d.entity_id);
+    ha.seq++;
+  }
+}
+
+function connectHA() {
+  if (!TOKEN) {
+    console.error(ha.reason);
+    return;
+  }
+  const sock = new WebSocket(HA_WS_URL);
+  ha.ws = sock;
+  sock.on('message', (raw) => {
+    let msg;
+    try { msg = JSON.parse(raw.toString()); } catch { return; }
+    handleHa(msg, sock).catch((e) => {
+      ha.reason = 'fout: ' + e.message;
+      console.error('HA-fout:', e.message);
+    });
+  });
+  sock.on('error', (err) => {
+    ha.reason = 'verbindingsfout: ' + err.message;
+    console.error('HA-verbinding:', err.message);
+  });
+  sock.on('close', () => {
+    ha.online = false;
+    ha.reason = 'verbinding verbroken, opnieuw proberen';
+    for (const p of ha.pending.values()) p.reject(new Error('verbinding verbroken'));
+    ha.pending.clear();
+    setTimeout(connectHA, 5000);
+  });
+}
+
+// Welke acties Home Assistant voor één entiteit aanbiedt (zoals de Tessera-add-on dat vraagt)
+async function actionsFor(entityId) {
+  try {
+    const answer = await haRequest({
+      type: 'get_services_for_target',
+      target: { entity_id: [entityId] },
+      expand_group: false,
+    });
+    return Array.isArray(answer) ? answer : [];
+  } catch {
+    return [];
+  }
+}
+
+// ---------- HTTP ----------
 
 function handle(req, res) {
   const url = new URL(req.url, 'http://localhost');
@@ -178,10 +270,45 @@ function handle(req, res) {
     });
   }
 
+  if (p === '/api/status' && req.method === 'GET') {
+    return sendJson(res, 200, { online: ha.online, reason: ha.reason, entities: ha.states.size, seq: ha.seq });
+  }
+
+  if (p === '/api/catalog' && req.method === 'GET') {
+    try {
+      return sendJson(res, 200, JSON.parse(fs.readFileSync(path.join(__dirname, 'catalog.json'), 'utf8')));
+    } catch {
+      return sendJson(res, 500, { error: 'catalogus niet leesbaar' });
+    }
+  }
+
   if (p === '/api/entities' && req.method === 'GET') {
-    getEntities()
-      .then((d) => sendJson(res, 200, d))
-      .catch((e) => sendJson(res, 502, { error: e.message }));
+    if (!ha.online) return sendJson(res, 503, { error: 'geen verbinding met Home Assistant: ' + ha.reason });
+    const list = [...ha.states.values()]
+      .map((s) => ({ entity_id: s.entity_id, name: (s.attributes && s.attributes.friendly_name) || s.entity_id }))
+      .sort((a, b) => a.entity_id.localeCompare(b.entity_id));
+    return sendJson(res, 200, list);
+  }
+
+  // Actuele waarden voor de tegels in het ontwerp (de editor vraagt dit elke paar seconden)
+  if (p === '/api/live' && req.method === 'GET') {
+    const ids = (url.searchParams.get('ids') || '').split(',').filter((id) => ENTITY_RE.test(id)).slice(0, 300);
+    const states = {};
+    for (const id of ids) {
+      const s = ha.states.get(id);
+      if (!s) continue;
+      const a = s.attributes || {};
+      states[id] = { state: s.state, unit: a.unit_of_measurement || '', name: a.friendly_name || id };
+    }
+    return sendJson(res, 200, { online: ha.online, reason: ha.reason, seq: ha.seq, states });
+  }
+
+  // Welke acties een entiteit heeft (van Home Assistant zelf, niet uit een vaste lijst)
+  if (p === '/api/actions' && req.method === 'GET') {
+    const id = url.searchParams.get('entity') || '';
+    if (!ENTITY_RE.test(id)) return sendJson(res, 400, { error: 'ongeldige entiteit' });
+    if (!ha.online) return sendJson(res, 503, { error: 'geen verbinding met Home Assistant' });
+    actionsFor(id).then((list) => sendJson(res, 200, { entity: id, actions: list }));
     return;
   }
 
@@ -221,3 +348,5 @@ http.createServer(handle).listen(PORT, () => {
   console.log(`Editor luistert op poort ${PORT}`);
   console.log(`Dashboardmap: ${DASH_DIR}`);
 });
+
+connectHA();

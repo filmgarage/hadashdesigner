@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "note": "Widgettypes zoals HADashboard ze in de voorbeelddashboards gebruikt. entity: false = geen entiteit nodig. domains = entiteiten die in de lijst passen. fields = extra eigenschappen die de editor toont (title en title2 altijd).",
+  "types": {
+    "clock":         { "name": "Klok", "entity": false, "fields": [], "width": 2 },
+    "weather":       { "name": "Weer", "domains": ["weather"], "fields": ["units"], "width": 2 },
+    "sensor":        { "name": "Sensor", "domains": ["sensor"], "fields": ["units", "precision"], "width": 1 },
+    "gauge":         { "name": "Meter", "domains": ["sensor", "input_number"], "fields": ["units", "precision"], "width": 2 },
+    "text_sensor":   { "name": "Tekst-sensor", "domains": ["sensor", "input_select", "text"], "fields": [], "width": 2 },
+    "binary_sensor": { "name": "Binaire sensor", "domains": ["binary_sensor"], "fields": [], "width": 1 },
+    "device_tracker":{ "name": "Aanwezigheid", "domains": ["device_tracker"], "fields": [], "width": 1 },
+    "switch":        { "name": "Schakelaar", "domains": ["switch", "input_boolean"], "fields": [], "width": 1 },
+    "light":         { "name": "Licht", "domains": ["light"], "fields": [], "width": 1 },
+    "scene":         { "name": "Scène", "domains": ["scene"], "fields": [], "width": 1 },
+    "cover":         { "name": "Rolluik / deur", "domains": ["cover"], "fields": [], "width": 1 },
+    "climate":       { "name": "Thermostaat", "domains": ["climate"], "fields": [], "width": 2 },
+    "input_number":  { "name": "Getalinvoer", "domains": ["input_number"], "fields": ["units", "precision"], "width": 1 },
+    "input_slider":  { "name": "Schuifregelaar", "domains": ["input_number"], "fields": ["units", "precision"], "width": 2 },
+    "media_player":  { "name": "Mediaspeler", "domains": ["media_player"], "fields": [], "width": 2 },
+    "alarm":         { "name": "Alarm", "domains": ["alarm_control_panel"], "fields": [], "width": 2 },
+    "group":         { "name": "Groep", "domains": ["group"], "fields": [], "width": 1 },
+    "camera":        { "name": "Camera", "domains": ["camera"], "fields": [], "width": 2 },
+    "mode":          { "name": "Modus", "domains": ["input_select"], "fields": [], "width": 1 },
+    "binary":        { "name": "Binair (status)", "entity": false, "fields": [], "width": 1 },
+    "label":         { "name": "Label", "entity": false, "fields": ["text"], "width": 2 },
+    "navigate":      { "name": "Navigatie", "entity": false, "fields": ["dashboard", "url"], "width": 1 },
+    "iframe":        { "name": "Iframe", "entity": false, "fields": ["url"], "width": 2 },
+    "rss":           { "name": "RSS", "entity": false, "fields": ["url"], "width": 2 },
+    "reload":        { "name": "Herladen", "entity": false, "fields": [], "width": 1 }
+  }
+}
